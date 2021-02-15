@@ -15,6 +15,8 @@ package ddl
 
 import (
 	"fmt"
+	"sync/atomic"
+
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/infoschema"
@@ -26,7 +28,6 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"go.uber.org/zap"
-	"sync/atomic"
 )
 
 // adjustColumnInfoInAddColumn is used to set the correct position of column info when adding column.
@@ -213,22 +214,25 @@ func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	}
 
 	originalState := colInfo.State
-	// TODO: fill the codes of the case `StatePublic`, `StateWriteOnly` and `StateDeleteOnly`.
-	//       You'll need to find the right place where to put the function `adjustColumnInfoInDropColumn`.
-	//       Also you'll need to take a corner case about the default value.
-	//       (Think about how the not null property and default value will influence the `Drop Column` operation.
 	switch colInfo.State {
 	case model.StatePublic:
-		// To be filled
+		// public -> write_only
+		job.SchemaState = model.StateWriteOnly
+		colInfo.State = model.StateWriteOnly
 		ver, err = updateVersionAndTableInfoWithCheck(t, job, tblInfo, originalState != colInfo.State)
 	case model.StateWriteOnly:
-		// To be filled
+		// write_only -> delete_only
+		job.SchemaState = model.StateDeleteOnly
+		colInfo.State = model.StateDeleteOnly
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != colInfo.State)
 	case model.StateDeleteOnly:
-		// To be filled
+		// delete_only -> reorganization
+		job.SchemaState = model.StateDeleteReorganization
+		colInfo.State = model.StateDeleteReorganization
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != colInfo.State)
 	case model.StateDeleteReorganization:
 		// reorganization -> absent
+		adjustColumnInfoInDropColumn(tblInfo, colInfo.Offset)
 		// All reorganization jobs are done, drop this column.
 		tblInfo.Columns = tblInfo.Columns[:len(tblInfo.Columns)-1]
 		colInfo.State = model.StateNone
@@ -236,7 +240,15 @@ func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
-
+		// Delete index if column `NOT NULL` and with index
+		if colInfo.GetDefaultValue() != nil && isColumnWithIndex(colInfo.Name.String(), tblInfo.Indices) {
+			// Reset state for column index schema
+			job.SchemaState = model.StatePublic
+			_, err = onDropIndex(t, job)
+			if err != nil {
+				return ver, errors.Trace(err)
+			}
+		}
 		// Finish this job.
 		if job.IsRollingback() {
 			job.FinishTableJob(model.JobStateRollbackDone, model.StateNone, ver, tblInfo)
