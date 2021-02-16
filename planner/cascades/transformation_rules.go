@@ -494,8 +494,58 @@ func NewRulePushSelDownAggregation() Transformation {
 // It will transform `sel->agg->x` to `agg->sel->x` or `sel->agg->sel->x`
 // or just keep the selection unchanged.
 func (r *PushSelDownAggregation) OnTransform(old *memo.ExprIter) (newExprs []*memo.GroupExpr, eraseOld bool, eraseAll bool, err error) {
-	// TODO: implement the algo according to the header comment.
-	return []*memo.GroupExpr{old.GetExpr()}, false, false, nil
+	selection := old.GetExpr().ExprNode.(*plannercore.LogicalSelection)
+	pushDownConds := make([]expression.Expression, 0, len(selection.Conditions))
+	topConds := make([]expression.Expression, 0, len(selection.Conditions))
+	aggregation := old.Children[0].GetExpr().ExprNode.(*plannercore.LogicalAggregation)
+	groupBySchema := expression.NewSchema(aggregation.GetGroupByCols()...)
+	for _, expr := range selection.Conditions {
+		switch expr.(type) {
+		case *expression.Constant:
+			pushDownConds = append(pushDownConds, expr)
+		case *expression.ScalarFunction:
+			cols := expression.ExtractColumns(expr)
+			totalContained := true
+			for _, col := range cols {
+				if !groupBySchema.Contains(col) {
+					totalContained = false
+					break
+				}
+			}
+			if totalContained {
+				pushDownConds = append(pushDownConds, expr)
+			} else {
+				topConds = append(topConds, expr)
+			}
+		default:
+			topConds = append(topConds, expr)
+		}
+	}
+	// it have not any conditions be pushed down, keep the selection unchanged.
+	if len(pushDownConds) == 0 {
+		return nil, false, false, nil
+	}
+	pushedDownSelection := plannercore.LogicalSelection{
+		Conditions: pushDownConds,
+	}.Init(selection.SCtx())
+	pushDownGroupExpr := memo.NewGroupExpr(pushedDownSelection)
+	childGroup := old.Children[0].GetExpr().Children[0]
+	pushDownGroupExpr.SetChildren(childGroup)
+	pushDownGroup := memo.NewGroupWithSchema(pushDownGroupExpr, childGroup.Prop.Schema)
+	aggGroupExpr := memo.NewGroupExpr(aggregation)
+	aggGroupExpr.SetChildren(pushDownGroup)
+	// `agg->sel->x`
+	if len(topConds) == 0 {
+		return []*memo.GroupExpr{aggGroupExpr}, true, false, nil
+	}
+	aggGroup := memo.NewGroupWithSchema(aggGroupExpr, aggregation.Schema())
+	topSelection := plannercore.LogicalSelection{
+		Conditions: topConds,
+	}.Init(selection.SCtx())
+	topSelectionGroupExpr := memo.NewGroupExpr(topSelection)
+	topSelectionGroupExpr.SetChildren(aggGroup)
+	// `sel->agg->sel->x`
+	return []*memo.GroupExpr{topSelectionGroupExpr}, true, false, nil
 }
 
 // TransformLimitToTopN transforms Limit+Sort to TopN.
@@ -798,5 +848,29 @@ func (r *MergeAggregationProjection) Match(old *memo.ExprIter) bool {
 // It will transform `Aggregation->Projection->X` to `Aggregation->X`.
 func (r *MergeAggregationProjection) OnTransform(old *memo.ExprIter) (newExprs []*memo.GroupExpr, eraseOld bool, eraseAll bool, err error) {
 	// TODO: implement the body according to the header comment.
-	return []*memo.GroupExpr{old.GetExpr()}, false, false, nil
+	agg := old.GetExpr().ExprNode.(*plannercore.LogicalAggregation)
+	projection := old.Children[0].GetExpr().ExprNode.(*plannercore.LogicalProjection)
+	projSchema := projection.Schema()
+	mergedGroupByItems := make([]expression.Expression, 0, len(agg.GroupByItems))
+	for _, groupByItem := range agg.GroupByItems {
+		mergedGroupByItems = append(mergedGroupByItems, expression.ColumnSubstitute(groupByItem, projSchema, projection.Exprs))
+	}
+	mergedAggFuncs := make([]*aggregation.AggFuncDesc, 0, len(agg.AggFuncs))
+	for _, aggFunc := range agg.AggFuncs {
+		mergedAggFuncArgs := make([]expression.Expression, 0, len(aggFunc.Args))
+		for _, aggFuncArg := range aggFunc.Args {
+			mergedAggFuncArgs = append(mergedAggFuncArgs, expression.ColumnSubstitute(aggFuncArg, projSchema, projection.Exprs))
+		}
+		newAggFunc := aggFunc.Clone()
+		newAggFunc.Args = mergedAggFuncArgs
+		mergedAggFuncs = append(mergedAggFuncs, newAggFunc)
+	}
+	newAgg := plannercore.LogicalAggregation{
+		AggFuncs:     mergedAggFuncs,
+		GroupByItems: mergedGroupByItems,
+	}.Init(agg.SCtx())
+	newAggGroupExpr := memo.NewGroupExpr(newAgg)
+	newAggGroupExpr.SetChildren(old.Children[0].GetExpr().Children...)
+
+	return []*memo.GroupExpr{newAggGroupExpr}, true, false, nil
 }

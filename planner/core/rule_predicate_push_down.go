@@ -352,11 +352,40 @@ func (p *LogicalProjection) PredicatePushDown(predicates []expression.Expression
 }
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.
-func (la *LogicalAggregation) PredicatePushDown(predicates []expression.Expression) (ret []expression.Expression, retPlan LogicalPlan) {
-	// TODO: Here you need to push the predicates across the aggregation.
+func (la *LogicalAggregation) PredicatePushDown(predicates []expression.Expression) ([]expression.Expression, LogicalPlan) {
 	//       A simple example is that `select * from (select count(*) from t group by b) tmp_t where b > 1` is the same with
 	//       `select * from (select count(*) from t where b > 1 group by b) tmp_t.
-	return predicates, la
+	exprs := make([]expression.Expression, 0)
+	for _, aggFunc := range la.AggFuncs {
+		exprs = append(exprs, aggFunc.Args...)
+	}
+	canBePushed := make([]expression.Expression, 0, len(predicates))
+	canNotBePushed := make([]expression.Expression, 0, len(predicates))
+	groupBySchema := expression.NewSchema(la.GetGroupByCols()...)
+	for _, predicate := range predicates {
+		switch predicate.(type) {
+		case *expression.Constant:
+			canBePushed = append(canBePushed, predicate)
+		case *expression.ScalarFunction:
+			cols := expression.ExtractColumns(predicate)
+			totalContained := true
+			for _, col := range cols {
+				if !groupBySchema.Contains(col) {
+					totalContained = false
+					break
+				}
+			}
+			if totalContained {
+				canBePushed = append(canBePushed, expression.ColumnSubstitute(predicate, la.Schema(), exprs))
+			} else {
+				canNotBePushed = append(canNotBePushed, predicate)
+			}
+		default:
+			canNotBePushed = append(canNotBePushed, predicate)
+		}
+	}
+	filtered, newPlan := la.baseLogicalPlan.PredicatePushDown(canBePushed)
+	return append(filtered, canNotBePushed...), newPlan
 }
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.
@@ -470,3 +499,5 @@ func (p *LogicalMemTable) PredicatePushDown(predicates []expression.Expression) 
 func (*ppdSolver) name() string {
 	return "predicate_push_down"
 }
+
+//
