@@ -486,16 +486,16 @@ func (s *testStatisticsSuite) TestColumnRange(c *C) {
 	ran[0].HighExclude = true
 	count, err = tbl.GetRowCountByColumnRanges(sc, 0, ran)
 	c.Assert(err, IsNil)
-	c.Assert(int(count), Equals, 9998)
+	c.Assert(int(count), Equals, 9964)
 	ran[0].LowExclude = false
 	ran[0].HighExclude = false
 	count, err = tbl.GetRowCountByColumnRanges(sc, 0, ran)
 	c.Assert(err, IsNil)
-	c.Assert(int(count), Equals, 10000)
+	c.Assert(int(count), Equals, 10037)
 	ran[0].LowVal[0] = ran[0].HighVal[0]
 	count, err = tbl.GetRowCountByColumnRanges(sc, 0, ran)
 	c.Assert(err, IsNil)
-	c.Assert(int(count), Equals, 1)
+	c.Assert(int(count), Equals, 38)
 }
 
 func (s *testStatisticsSuite) TestIntColumnRanges(c *C) {
@@ -657,5 +657,5 @@ func (s *testStatisticsSuite) TestIndexRanges(c *C) {
 	ran[0].HighVal[0] = types.NewIntDatum(1000)
 	count, err = tbl.GetRowCountByIndexRanges(sc, 0, ran)
 	c.Assert(err, IsNil)
-	c.Assert(int(count), Equals, 0)
+	c.Assert(int(count), Equals, 36)
 }

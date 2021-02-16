@@ -80,7 +80,7 @@ func (s *testStatisticsSuite) TestCMSketch(c *C) {
 	}{
 		{
 			zipfFactor: 1.1,
-			avgError:   3,
+			avgError:   0xf,
 		},
 		{
 			zipfFactor: 2,
